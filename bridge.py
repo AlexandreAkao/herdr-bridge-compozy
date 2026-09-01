@@ -27,12 +27,27 @@ AGENT_ID = "compozy"
 # fora daqui ficam as sessoes internas do daemon: spawned (memory extractor),
 # dream (checkpoint/curator) e o que mais o daemon inventar depois.
 ALLOW_SESSION_TYPES = {"user", "system"}
+
+# sessao sem evento ha tanto tempo e considerada morta ao consolidar a linha.
+# Sem isso, um turn.end perdido (crash, daemon reiniciado) deixa a linha presa
+# em `working` para sempre, porque hook so roda quando ha evento.
+STALE_SESSION_SECONDS = 1800
 SKIP_INPUT_CLASSES = {"synthetic_reentry"}
 
 # eventos que tiram a sessao da lista de ativas (em vez de marcar um estado)
-TERMINAL_EVENTS = {"session.post_stop", "agent.stopped", "agent.crashed"}
+TERMINAL_EVENTS = {"session.post_stop", "agent.stopped", "agent.crashed", "loop.terminal"}
 # prioridade ao consolidar varias sessoes do mesmo agente numa linha so
 STATE_RANK = {"blocked": 3, "working": 2, "idle": 1}
+
+# eventos de loop nao mudam o estado da linha, so enriquecem os tokens
+LOOP_EVENTS = {"loop.started", "loop.generation.post", "loop.gate.post", "loop.terminal"}
+
+# session.attention.changed carrega `from`/`to` (atividade da sessao) e
+# `class` — o motivo pelo qual ela quer voce. Vocabulario observado em runtime:
+# none (nada), finished (terminou, informativo). O binario tambem conhece
+# `clarify`, que e a pergunta viva de `compozy session clarify`.
+ATTENTION_CLASS_KEY = "class"
+ATTENTION_BENIGN = {"none", "finished", ""}
 
 EVENT_STATE = {
     "session.post_create": "idle",
@@ -40,6 +55,8 @@ EVENT_STATE = {
     "message.start": "working",
     "turn.end": "idle",
     "permission.request": "blocked",
+    "permission.denied": "blocked",
+    "permission.resolved": "working",
     "task.needs_attention": "blocked",
     "task.blocked": "blocked",
     "session.post_stop": "idle",
@@ -115,6 +132,29 @@ def pane_alive(pane_id):
     return bool(res and "result" in res)
 
 
+def row_key(workspace_id, agent_name):
+    """Chave da linha. Dois workspaces rodando o mesmo agente sao linhas
+    distintas — antes disputavam a mesma e o tail misturava as duas."""
+    return f"{workspace_id or 'no-ws'}/{agent_name}"
+
+
+def prune(data):
+    """Tira do mapa as entradas cujo pane nao existe mais. Devolve os removidos."""
+    dead = [k for k, e in data.items() if not pane_alive(e.get("pane_id", ""))]
+    for k in dead:
+        data.pop(k, None)
+    return dead
+
+
+def drop_stale(sessions, now=None):
+    """Descarta sessao sem evento recente (auto-cura de linha presa)."""
+    now = now if now is not None else time.time()
+    return {
+        sid: info for sid, info in sessions.items()
+        if now - float(info.get("ts") or 0) < STALE_SESSION_SECONDS
+    }
+
+
 def tail_command(agent_name):
     """Comando que roda dentro do pane: log do agente, colorido."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -123,10 +163,10 @@ def tail_command(agent_name):
             f" | python3 {colorizer}\n")
 
 
-def ensure_row(data, agent_name):
-    """Entrada do mapa para esse agente, criando a aba no herdr se preciso.
+def ensure_row(data, key, agent_name):
+    """Entrada do mapa para essa linha, criando a aba no herdr se preciso.
     Precisa ser chamada com o lock ja segurado."""
-    entry = data.get(agent_name)
+    entry = data.get(key)
     if entry and pane_alive(entry.get("pane_id", "")):
         return entry
 
@@ -138,8 +178,8 @@ def ensure_row(data, agent_name):
     # o pane vira um tail util em vez de um shell vazio.
     # o CLI do compozy nao emite ANSI, entao o jsonl passa pelo colorize.py
     herdr("pane.send_text", {"pane_id": pane_id, "text": tail_command(agent_name)})
-    entry = {"pane_id": pane_id, "tab_id": tab_id, "sessions": {}}
-    data[agent_name] = entry
+    entry = {"pane_id": pane_id, "tab_id": tab_id, "agent": agent_name, "sessions": {}}
+    data[key] = entry
     log(f"linha criada para {agent_name}: {pane_id}")
     return entry
 
@@ -157,9 +197,47 @@ def consolidate(sessions):
     return best.get("state", "idle"), (best_id, best)
 
 
+def read_attention(payload):
+    """True se a sessao precisa de voce, False se nao, None se o formato mudou.
+    Nunca deduz: uma linha presa em `blocked` por chute e pior que nao mostrar."""
+    if ATTENTION_CLASS_KEY not in payload:
+        return None
+    cls = str(payload.get(ATTENTION_CLASS_KEY) or "").strip().lower()
+    if cls in ATTENTION_BENIGN:
+        return False
+    # classe fora do vocabulario conhecido: trata como atencao (e o lado
+    # seguro para quem esta olhando) e registra para afinar o mapeamento
+    log(f"attention class desconhecida: {cls!r}")
+    return True
+
+
+def loop_tokens(payload):
+    """Tokens de loop presentes no payload. Ausente vira None (o herdr limpa)."""
+    gen = payload.get("generation")
+    if gen is None:
+        gen = payload.get("generation_index")
+    loop = payload.get("loop") or payload.get("loop_name") or payload.get("loop_id")
+    return {
+        "cz_loop": str(loop)[:24] if loop else None,
+        "cz_gen": str(gen) if gen is not None else None,
+    }
+
+
 def handle(payload):
     event = payload.get("event") or ""
     state = EVENT_STATE.get(event)
+
+    if event == "session.attention.changed":
+        flag = read_attention(payload)
+        if flag is None:
+            # formato desconhecido: registra pra calibrar e nao mexe na linha
+            log(f"payload nao reconhecido em {event}: {json.dumps(payload)[:2000]}")
+            return
+        state = "blocked" if flag else "idle"
+
+    if event in LOOP_EVENTS and not state:
+        state = "working" if event != "loop.terminal" else "idle"
+
     if not state:
         return
     if payload.get("session_type") not in ALLOW_SESSION_TYPES:
@@ -170,13 +248,14 @@ def handle(payload):
     if not agent_name:
         return
     session_id = payload.get("session_id") or "?"
+    key = row_key(payload.get("workspace_id"), agent_name)
 
     with Locked():
         data = load_map()
-        entry = ensure_row(data, agent_name)
+        entry = ensure_row(data, key, agent_name)
         if not entry:
             return
-        sessions = entry.setdefault("sessions", {})
+        sessions = drop_stale(entry.setdefault("sessions", {}))
         if event in TERMINAL_EVENTS:
             sessions.pop(session_id, None)
         else:
@@ -185,6 +264,7 @@ def handle(payload):
                 "name": payload.get("session_name"),
                 "type": payload.get("session_type"),
                 "turn": payload.get("turn_id"),
+                "ts": time.time(),
             }
         row_state, active = consolidate(sessions)
         if active and active[1].get("name"):
@@ -194,7 +274,7 @@ def handle(payload):
         entry["sessions"] = {s: i for s, i in sessions.items() if i.get("state") != "idle"}
         live = len(entry["sessions"])
         last_title = entry.get("last_title")
-        data[agent_name] = entry
+        data[key] = entry
         save_map(data)
         pane_id = entry["pane_id"]
 
@@ -211,6 +291,7 @@ def handle(payload):
         "display_agent": AGENT_ID,
         "title": (active_info.get("name") if active_info else None) or last_title or agent_name,
         "tokens": {
+            **loop_tokens(payload),
             "cz_agent": agent_name,
             "cz_session": (active_id or "")[:24] or None,
             "cz_type": active_info.get("type") if active_info else None,
@@ -220,12 +301,17 @@ def handle(payload):
 
 
 def cmd_status():
-    data = load_map()
+    with Locked():
+        data = load_map()
+        dead = prune(data)
+        if dead:
+            save_map(data)
+    for k in dead:
+        print(f"  podada (pane morto): {k}")
     print(f"linhas mapeadas: {len(data)}")
-    for agent, entry in sorted(data.items()):
-        alive = "viva" if pane_alive(entry["pane_id"]) else "MORTA"
-        live = entry.get("sessions") or {}
-        print(f"  {agent:24} {entry['pane_id']:8} {entry['tab_id']:8} {alive}  sessoes={len(live)}")
+    for key, entry in sorted(data.items()):
+        live = drop_stale(entry.get("sessions") or {})
+        print(f"  {key:34} {entry['pane_id']:8} {entry['tab_id']:8} sessoes={len(live)}")
         for sid, info in live.items():
             print(f"       {sid:26} {info.get('state')}")
     res = herdr("agent.list", {})
@@ -239,26 +325,27 @@ def cmd_status():
 def cmd_reset():
     with Locked():
         data = load_map()
-        for agent, entry in data.items():
+        for key, entry in data.items():
             herdr("pane.release_agent", {
                 "pane_id": entry["pane_id"], "source": SOURCE,
                 "agent": AGENT_ID, "seq": time.time_ns()})
             herdr("tab.close", {"tab_id": entry["tab_id"]})
-            print(f"removida: {agent} ({entry['tab_id']})")
+            print(f"removida: {key} ({entry['tab_id']})")
         save_map({})
 
 
 def cmd_refresh():
     """Reinicia o tail dos panes existentes com o comando novo."""
-    for agent, entry in load_map().items():
+    for key, entry in load_map().items():
         pane_id = entry["pane_id"]
+        agent = entry.get("agent") or key.split("/")[-1]
         if not pane_alive(pane_id):
-            print(f"  {agent}: pane morto, pulando")
+            print(f"  {key}: pane morto, pulando")
             continue
         herdr("pane.send_keys", {"pane_id": pane_id, "keys": ["ctrl+c"]})
         time.sleep(0.3)
         herdr("pane.send_text", {"pane_id": pane_id, "text": tail_command(agent)})
-        print(f"  {agent}: tail reiniciado em {pane_id}")
+        print(f"  {key}: tail reiniciado em {pane_id}")
 
 
 def main():

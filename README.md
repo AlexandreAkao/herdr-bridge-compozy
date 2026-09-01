@@ -71,12 +71,44 @@ The installed copy lives in `~/.compozy/extensions/herdr-bridge/`.
 | `session.post_create` | `idle` |
 | `turn.start` | `working` |
 | `turn.end` | `idle` |
-| `permission.request` | `blocked` |
-| `session.post_stop`, `agent.stopped`, `agent.crashed` | session leaves the row |
+| `permission.request`, `permission.denied`, `task.needs_attention` | `blocked` |
+| `permission.resolved` | `working` |
+| `session.attention.changed` | `blocked` / `idle`, when the payload says so — see below |
+| `loop.started`, `loop.generation.post`, `loop.gate.post` | `working`, plus `$cz_loop` / `$cz_gen` tokens |
+| `session.post_stop`, `agent.stopped`, `agent.crashed`, `loop.terminal` | session leaves the row |
 
 Only `user` and `system` sessions get a row. The daemon's own internals
 (`spawned` memory extractors, `dream` curators) are filtered out — see
 [docs/compozy-hooks.md](docs/compozy-hooks.md).
+
+### Rows are per agent, and they self-heal
+
+The map key is `(workspace_id, agent_name)`, so the same agent running in two
+workspaces gets two rows instead of fighting over one.
+
+A row's state is consolidated from every live session of that agent, so a
+session ending never clears a sibling that is still working. Sessions with no
+event for 30 minutes are dropped from that calculation: a lost `turn.end` — a
+crash, a restarted daemon — would otherwise pin the row at `working` forever,
+because a hook only runs when there is an event.
+
+`--status` prunes rows whose pane no longer exists.
+
+### Attention, and payloads not yet observed
+
+`session.attention.changed` carries `from` / `to` (the session's activity) and
+`class` — *why* it wants you. Observed at runtime: `none` (nothing) and
+`finished` (it ended; informational). The daemon also knows `clarify`, the live
+question behind `compozy session clarify`. Anything outside the benign set marks
+the row `blocked` and logs the class, so an unknown reason errs toward being
+visible rather than silent.
+
+The `loop.*` family is wired but its payload was never captured here — those
+events only fire on generation boundaries. `loop_tokens()` reads the fields it
+recognizes and emits nothing when it recognizes none; unrecognized payloads land
+in `~/.local/state/herdr-bridge/bridge.log`. Nothing is guessed: a row pinned by
+a bad guess is worse than a row that says nothing. If you catch such a log line,
+open an issue with it.
 
 ## License
 

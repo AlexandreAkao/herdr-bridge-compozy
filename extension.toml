@@ -1,6 +1,6 @@
 [extension]
 name = "herdr-bridge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reflete o estado dos agentes do CompozyOS como linhas de agente no herdr, com o log do agente colorido no pane."
 min_compozy_version = "0.3.0-beta.1"
 
@@ -34,6 +34,62 @@ executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
 [[resources.hooks]]
 name = "herdr.permission_request"
 event = "permission.request"
+mode = "async"
+timeout = "5s"
+executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
+
+[[resources.hooks]]
+name = "herdr.permission_denied"
+event = "permission.denied"
+mode = "async"
+timeout = "5s"
+executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
+
+[[resources.hooks]]
+name = "herdr.permission_resolved"
+event = "permission.resolved"
+mode = "async"
+timeout = "5s"
+executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
+
+[[resources.hooks]]
+name = "herdr.task_needs_attention"
+event = "task.needs_attention"
+mode = "async"
+timeout = "5s"
+executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
+
+[[resources.hooks]]
+name = "herdr.session_attention_changed"
+event = "session.attention.changed"
+mode = "async"
+timeout = "5s"
+executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
+
+[[resources.hooks]]
+name = "herdr.loop_started"
+event = "loop.started"
+mode = "async"
+timeout = "5s"
+executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
+
+[[resources.hooks]]
+name = "herdr.loop_generation_post"
+event = "loop.generation.post"
+mode = "async"
+timeout = "5s"
+executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
+
+[[resources.hooks]]
+name = "herdr.loop_gate_post"
+event = "loop.gate.post"
+mode = "async"
+timeout = "5s"
+executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
+
+[[resources.hooks]]
+name = "herdr.loop_terminal"
+event = "loop.terminal"
 mode = "async"
 timeout = "5s"
 executor = { kind = "subprocess", command = "{{config_dir}}/bridge.py" }
