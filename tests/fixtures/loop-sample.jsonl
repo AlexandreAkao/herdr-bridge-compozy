@@ -1,0 +1,12 @@
+{"type": "usage", "summary": "{\"sessionUpdate\":\"usage_update\",\"used\":1000,\"size\":1000000}", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "skill.shadowed", "summary": "skill example resolved to workspace and shadowed 1 declaration(s)", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "tool_call", "summary": "Terminal", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "tool_call", "summary": "cd /srv/app; npx tsc --noEmit", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "tool_call", "summary": "Terminal", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "tool_call", "summary": "cd /srv/app; npx tsc --noEmit", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "tool_result", "summary": "[REDACTED]", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "agent_message", "summary": "Runn", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "agent_message", "summary": "ing the suite now.", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "tool_call", "summary": "python3 - <<'PY'\nimport json\nprint(1)\nPY", "outcome": "info", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "tool_result", "summary": "suite failed: 2 specs", "outcome": "failure", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
+{"type": "done", "summary": "end_turn", "outcome": "success", "timestamp": "2026-01-01T10:00:00.000000Z", "agent_name": "reviewer", "session_id": "sess-fixture", "component": "session"}
