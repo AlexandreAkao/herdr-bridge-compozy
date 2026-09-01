@@ -25,8 +25,12 @@ hook.
 ## Install
 
 ```bash
-compozy extension install AlexandreAkao/herdr-bridge-compozy
+compozy extension install AlexandreAkao/herdr-bridge-compozy --allow-unverified --yes
 ```
+
+The flags are required: community-tier extensions carry no registry-verified
+checksum, so the daemon refuses a plain install with
+`Extension checksum is unverified`.
 
 Or from a local clone:
 
