@@ -62,13 +62,21 @@ lines before filtering and 66 after (76% less). What it drops and why is in
 
 | Command | What it does |
 | --- | --- |
-| `bridge.py --status` | Shows the agent→pane map and the live sessions per agent |
+| `bridge.py --status` | Shows the map, prunes dead panes, reconciles loop rows against the daemon |
 | `bridge.py --refresh` | Restarts the tail in existing panes without closing tabs |
 | `bridge.py --reset` | Closes every tab the bridge opened and clears the map |
 
 The installed copy lives in `~/.compozy/extensions/herdr-bridge/`.
 
 ## Hooks
+
+Every hook runs `hook.sh`, a 16 ms shell shim that spools the payload and
+returns; `bridge.py --drain` then processes the spool in timestamp order in
+the background. The daemon dispatches an extension's hooks serially and drops
+the queue when the run ends, so the hook entry point has to be faster than the
+events arrive — see [docs/compozy-hooks.md](docs/compozy-hooks.md).
+
+### Agent rows
 
 | Event | Row becomes |
 | --- | --- |
@@ -77,13 +85,36 @@ The installed copy lives in `~/.compozy/extensions/herdr-bridge/`.
 | `turn.end` | `idle` |
 | `permission.request`, `permission.denied`, `task.needs_attention` | `blocked` |
 | `permission.resolved` | `working` |
-| `session.attention.changed` | `blocked` / `idle`, when the payload says so — see below |
-| `loop.started`, `loop.generation.post`, `loop.gate.post` | `working`, plus `$cz_loop` / `$cz_gen` tokens |
-| `session.post_stop`, `agent.stopped`, `agent.crashed`, `loop.terminal` | session leaves the row |
+| `session.attention.changed` | `blocked` / `idle`, from the `class` field — see below |
+| `session.post_stop`, `agent.stopped`, `agent.crashed` | session leaves the row |
 
 Only `user` and `system` sessions get a row. The daemon's own internals
-(`spawned` memory extractors, `dream` curators) are filtered out — see
-[docs/compozy-hooks.md](docs/compozy-hooks.md).
+(`spawned` memory extractors, `dream` curators) are filtered out.
+
+### Loop rows
+
+A loop is not an agent — it is a run that spawns agent sessions, and its events
+carry `loop_run_id` / `loop_name` / `generation`, never `agent_name`. So each
+loop gets its own row, keyed `loop/<workspace>/<loop_name>`, whose pane follows
+`compozy loop events --run <id> --follow`.
+
+| Event | Mode | Row becomes |
+| --- | --- | --- |
+| `loop.started` | async | `working`, `$cz_run` |
+| `loop.generation.pre` | **sync** | `working`, `$cz_gen` |
+| `coordinator.decision` | **sync** | `working`, `$cz_node = review.0:loop_action` |
+| `loop.generation.post`, `loop.gate.post` | async | `working`, `$cz_gen` |
+| `loop.node.terminal` | async | `$cz_node = review.0:succeeded` |
+| `loop.terminal` with `status: blocked` | async | **`blocked`** — and it stays until you act |
+| `loop.terminal` with `done` / `exhausted` / `canceled` | async | `idle`, `$cz_status` |
+
+The two **sync** hooks are the reliable ones: the daemon waits for them. The
+async ones are canceled whenever the emitting step's context ends — on a
+zero-agent loop that finishes in 200 ms, nearly all of them; on a real loop,
+mostly `loop.terminal`, which fires as the run's context closes. That is the
+event that says `blocked`, so `bridge.py --status` **reconciles** every live
+loop row against `compozy loop status` and fixes the state. Run it when a row
+looks stale.
 
 ### Rows are per agent, and they self-heal
 

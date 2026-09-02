@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0
+
+**Loop rows.** 0.2.0 advertised loop visibility and it never worked: loop
+events carry no `agent_name`, and the bridge dropped every payload without one.
+Loops now get their own row, keyed by `(workspace, loop_name)`, with a pane that
+follows `compozy loop events --run <id> --follow`. `loop.terminal` with
+`status: blocked` turns the row `blocked` and keeps it there.
+
+**Hook entry point is a shell shim.** The daemon dispatches an extension's
+hooks serially and cancels async hooks when the emitting step's context ends;
+a Python entry point lost four events in five on a fast loop. `hook.sh` spools
+the payload in ~16 ms and `bridge.py --drain` processes the spool in timestamp
+order, so late drainers never reorder events.
+
+**Sync signals + reconciliation.** `loop.generation.pre` and
+`coordinator.decision` are registered as `sync` hooks (the daemon waits for
+those) and drive generation and node tokens reliably. Because `loop.terminal`
+is async-only and fires as the run closes, `--status` reconciles live loop rows
+against `compozy loop status` and fixes their state.
+
+**Blocked never goes stale.** A row waiting on you stays `blocked` past the
+30-minute stale cutoff.
+
+Fixtures for the loop tests are real payloads captured from a run.
+
+
 ## 0.2.0
 
 **Operator attention.** Registers `permission.denied`, `permission.resolved`,

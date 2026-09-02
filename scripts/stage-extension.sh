@@ -7,10 +7,10 @@ dest="${1:?uso: stage-extension.sh <diretorio-destino>}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 mkdir -p "$dest"
-for f in extension.toml bridge.py colorize.py LICENSE README.md; do
+for f in extension.toml hook.sh bridge.py colorize.py LICENSE README.md; do
   cp "$root/$f" "$dest/$f"
 done
-chmod +x "$dest/bridge.py" "$dest/colorize.py"
+chmod +x "$dest/hook.sh" "$dest/bridge.py" "$dest/colorize.py"
 
 echo "empacotado em $dest:"
 ls -1 "$dest"

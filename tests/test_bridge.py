@@ -88,20 +88,121 @@ def test_read_attention():
           bridge.read_attention({"session_id": "x"}) is None)
 
 
-def test_loop_tokens():
-    print("loop_tokens")
-    t = bridge.loop_tokens({"loop": "pr-review-fix", "generation": 2})
-    check("nome do loop vira token", t["cz_loop"] == "pr-review-fix")
-    check("geracao vira token", t["cz_gen"] == "2")
-    check("geracao zero nao some", bridge.loop_tokens({"generation": 0})["cz_gen"] == "0")
-    vazio = bridge.loop_tokens({})
-    check("payload sem loop limpa os tokens",
-          vazio["cz_loop"] is None and vazio["cz_gen"] is None)
+class FakeHerdr:
+    """Substitui o socket do herdr: grava as chamadas e devolve panes falsos."""
+
+    def __init__(self):
+        self.calls = []
+        self.n = 0
+
+    def __call__(self, method, params):
+        self.calls.append((method, params))
+        if method == "tab.create":
+            self.n += 1
+            return {"result": {"root_pane": {"pane_id": f"p{self.n}"}, "tab": {"tab_id": f"t{self.n}"}}}
+        return {"result": {"type": "ok"}}
+
+    def reports(self):
+        return [p for m, p in self.calls if m == "pane.report_agent"]
+
+    def last_tokens(self):
+        metas = [p for m, p in self.calls if m == "pane.report_metadata"]
+        return metas[-1]["tokens"] if metas else {}
+
+
+def test_loop_rows():
+    print("loop rows (payloads reais de um run)")
+    import json, tempfile
+    fixture = os.path.join(ROOT, "tests", "fixtures", "loop-events.jsonl")
+    events = [json.loads(l) for l in open(fixture) if l.strip()]
+    fake = FakeHerdr()
+    tmp = tempfile.mkdtemp()
+    saved = (bridge.herdr, bridge.pane_alive, bridge.STATE_DIR, bridge.MAP_PATH, bridge.LOG_PATH)
+    bridge.herdr, bridge.pane_alive = fake, lambda pane_id: True
+    bridge.STATE_DIR, bridge.MAP_PATH = tmp, os.path.join(tmp, "panes.json")
+    bridge.LOG_PATH = os.path.join(tmp, "bridge.log")
+    try:
+        by = {}
+        for e in events:
+            by.setdefault(e["event"], e)          # primeiro de cada tipo
+        nodes = [e for e in events if e["event"] == "loop.node.terminal"]
+        bridge.handle(by["loop.started"])
+        check("loop.started cria uma linha propria (tab.create)",
+              any(m == "tab.create" and p["label"].startswith("cz:loop:") for m, p in fake.calls))
+        check("o pane segue a timeline do run",
+              any(m == "pane.send_text" and "loop events --run" in p["text"] for m, p in fake.calls))
+        check("linha nasce working", fake.reports()[-1]["state"] == "working")
+
+        bridge.handle(by["loop.generation.post"])
+        check("geracao vira token", fake.last_tokens().get("cz_gen") == "1")
+
+        bridge.handle(nodes[0])
+        check("no terminal vira token nome:disposicao (sem loop_name no payload)",
+              fake.last_tokens().get("cz_node") == "review.0:succeeded")
+        bridge.handle(nodes[1])
+        check("o no seguinte substitui o token", fake.last_tokens().get("cz_node") == "fix.0:succeeded")
+        check("no terminal nao muda o estado", fake.reports()[-1]["state"] == "working")
+
+        bridge.handle(by["coordinator.decision"])
+        check("coordinator.decision (sync, sem loop_run_id) acha a linha pelo task_id",
+              fake.last_tokens().get("cz_node") == "fix.0:loop_action")
+        check("e mantem a geracao vinda do task_id", fake.last_tokens().get("cz_gen") == "1")
+
+        done = dict(by["loop.terminal"]); done["status"] = "done"
+        bridge.handle(done)
+        check("terminal done -> idle", fake.reports()[-1]["state"] == "idle")
+        check("motivo fica no token", fake.last_tokens().get("cz_status") == "done")
+
+        bridge.handle(by["loop.started"])
+        blocked = dict(by["loop.terminal"]); blocked["status"] = "blocked"
+        bridge.handle(blocked)
+        check("terminal blocked -> linha blocked", fake.reports()[-1]["state"] == "blocked")
+        check("o mesmo loop reusa a linha (uma tab so)",
+              sum(1 for m, _ in fake.calls if m == "tab.create") == 1)
+
+        entry = next(e for e in bridge.load_map().values() if e.get("kind") == "loop")
+        stale = bridge.drop_stale(entry["sessions"], now=time.time() + bridge.STALE_SESSION_SECONDS * 2)
+        check("blocked nao envelhece (continua esperando voce)", len(stale) == 1)
+    finally:
+        bridge.herdr, bridge.pane_alive, bridge.STATE_DIR, bridge.MAP_PATH, bridge.LOG_PATH = saved
+
+
+def test_drain_order():
+    print("drain_spool (ordem por timestamp, nao por chegada)")
+    import json, tempfile
+    fake = FakeHerdr()
+    tmp = tempfile.mkdtemp()
+    saved = (bridge.herdr, bridge.pane_alive, bridge.STATE_DIR, bridge.MAP_PATH, bridge.LOG_PATH, bridge.SPOOL_DIR)
+    bridge.herdr, bridge.pane_alive = fake, lambda pane_id: True
+    bridge.STATE_DIR, bridge.MAP_PATH = tmp, os.path.join(tmp, "panes.json")
+    bridge.LOG_PATH, bridge.SPOOL_DIR = os.path.join(tmp, "bridge.log"), os.path.join(tmp, "spool")
+    os.makedirs(bridge.SPOOL_DIR)
+    try:
+        base = {"workspace_id": "ws_t", "loop_run_id": "looprun-x", "loop_name": "probe"}
+        # gravados fora de ordem: terminal primeiro, started por ultimo
+        spool = [
+            ("c.json", {**base, "event": "loop.terminal", "status": "done", "timestamp": "2026-01-01T00:00:00.300Z"}),
+            ("b.json", {**base, "event": "loop.generation.post", "generation": 1, "timestamp": "2026-01-01T00:00:00.200Z"}),
+            ("a.json", {**base, "event": "loop.started", "status": "running", "timestamp": "2026-01-01T00:00:00.100Z"}),
+        ]
+        for name, payload in spool:
+            with open(os.path.join(bridge.SPOOL_DIR, name), "w") as fh:
+                json.dump(payload, fh)
+        with open(os.path.join(bridge.SPOOL_DIR, "lixo.json"), "w") as fh:
+            fh.write("{ meio escrito")
+        n = bridge.drain_spool()
+        check("drena os 3 validos", n == 3)
+        states = [r["state"] for r in fake.reports()]
+        check("processa em ordem de timestamp: working, working, idle", states == ["working", "working", "idle"])
+        check("arquivo corrompido e descartado sem quebrar", not os.listdir(bridge.SPOOL_DIR))
+        check("segunda drenagem nao encontra nada", bridge.drain_spool() == 0)
+    finally:
+        (bridge.herdr, bridge.pane_alive, bridge.STATE_DIR, bridge.MAP_PATH, bridge.LOG_PATH, bridge.SPOOL_DIR) = saved
 
 
 def main():
     for fn in (test_row_key, test_drop_stale, test_consolidate, test_prune,
-               test_read_attention, test_loop_tokens):
+               test_read_attention, test_loop_rows, test_drain_order):
         fn()
     print()
     if failures:

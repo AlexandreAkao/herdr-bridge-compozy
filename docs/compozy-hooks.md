@@ -48,6 +48,39 @@ It installs as `Type: resource` and validates without a `[subprocess]` section.
 But `compozy extension dev` refuses it — that path requires `package.json` or
 `go.mod`. Use `compozy extension install <path>` instead.
 
+## 5. Async hooks are canceled with the step's context — and loop events are async-only
+
+Measured on a zero-agent loop that emits its five `loop.*` events within
+223 ms. The daemon log:
+
+```
+x65  WARN  hook.dispatch.async_failed   hook canceled: context canceled
+       by event:  loop.node.terminal 26, loop.generation.post 14, loop.terminal 14, loop.started 7
+```
+
+An `async` hook is dispatched on a context derived from the emitting step;
+when that step finishes, every hook still queued for it is canceled. The
+daemon also dispatches one extension's hooks **serially**, so a slow entry point
+(a Python interpreter is ~18 ms before it does anything) makes it worse.
+
+Two consequences:
+
+- **The hook entry point must return in milliseconds.** `hook.sh` spools the
+  payload and returns in ~16 ms; a detached `bridge.py --drain` does the work.
+  A 2 ms `/bin/sh` recorder received every event; a Python entry point received
+  one in five.
+- **Prefer sync events where they exist.** `loop.generation.pre`,
+  `loop.gate.pre` and `coordinator.*` accept `mode = "sync"` — the daemon waits
+  for them. `loop.started`, `loop.generation.post`, `loop.gate.post`,
+  `loop.node.terminal` and `loop.terminal` are async-only (`compozy hooks
+  events` shows the `Sync` column) and the daemon rejects `mode = "sync"` on
+  them. `loop.terminal` fires as the run's context closes, so it is the most
+  exposed — reconcile terminal state by asking the daemon instead.
+
+`compozy loop status --run-id <id> --workspace <ws> -o json` answers in ~10 s
+here (the workspace resolution cost, even with `--workspace`), so reconcile on
+demand, not per event.
+
 ## Bonus: verifying color in a herdr pane
 
 `pane.read` with `format: "text"` returns the *rendered screen*, so it contains
