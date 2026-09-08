@@ -38,6 +38,12 @@ Or from a local clone:
 compozy extension install ./herdr-bridge-compozy --allow-unverified --yes
 ```
 
+To update an existing marketplace installation:
+
+```bash
+compozy extension update herdr-bridge --allow-unverified --yes
+```
+
 ## What you get
 
 One row per agent name, not per session — loops spin up dozens of short-lived
@@ -45,6 +51,11 @@ sessions of the same agent, and a row per session would be unreadable. The row
 consolidates every live session of that agent: `blocked` wins over `working`
 wins over `idle`, so a session ending never clears a sibling that is still
 working.
+
+When the last session ends, the bridge closes its pane and removes the row
+from its map. An idle session stays open between turns, and another open
+session of the same agent keeps the shared pane alive. Repeated stop events
+do not recreate a closed pane; a new session opens a new one.
 
 Each row owns a herdr tab running:
 
@@ -86,7 +97,7 @@ events arrive — see [docs/compozy-hooks.md](docs/compozy-hooks.md).
 | `permission.request`, `permission.denied`, `task.needs_attention` | `blocked` |
 | `permission.resolved` | `working` |
 | `session.attention.changed` | `blocked` / `idle`, from the `class` field — see below |
-| `session.post_stop`, `agent.stopped`, `agent.crashed` | session leaves the row |
+| `session.post_stop`, `agent.stopped`, `agent.crashed` | session leaves the row; the pane closes when the last session ends |
 
 Only `user` and `system` sessions get a row. The daemon's own internals
 (`spawned` memory extractors, `dream` curators) are filtered out.
@@ -126,6 +137,11 @@ session ending never clears a sibling that is still working. Sessions with no
 event for 30 minutes are dropped from that calculation: a lost `turn.end` — a
 crash, a restarted daemon — would otherwise pin the row at `working` forever,
 because a hook only runs when there is an event.
+
+This timeout only affects the displayed activity. Open sessions remain tracked
+until a terminal event arrives, so a quiet sibling does not lose its pane.
+If closing the pane fails, the map entry stays available for a subsequent stop
+event to retry.
 
 `--status` prunes rows whose pane no longer exists.
 

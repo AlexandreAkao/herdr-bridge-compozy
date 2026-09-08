@@ -15,3 +15,7 @@ jobs:
           python-version: "3.12"
       - name: render fixture and assert filters
         run: python3 tests/test_colorize.py
+      - name: verify bridge state and session lifecycle
+        run: |
+          python3 tests/test_bridge.py
+          python3 tests/test_session_lifecycle.py

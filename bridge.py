@@ -30,7 +30,7 @@ AGENT_ID = "compozy"
 # dream (checkpoint/curator) e o que mais o daemon inventar depois.
 ALLOW_SESSION_TYPES = {"user", "system"}
 
-# sessao sem evento ha tanto tempo e considerada morta ao consolidar a linha.
+# sessao sem evento ha tanto tempo sai do calculo de atividade da linha.
 # Sem isso, um turn.end perdido (crash, daemon reiniciado) deixa a linha presa
 # em `working` para sempre, porque hook so roda quando ha evento.
 STALE_SESSION_SECONDS = 1800
@@ -160,7 +160,7 @@ def prune(data):
 
 
 def drop_stale(sessions, now=None):
-    """Descarta sessao sem evento recente (auto-cura de linha presa)."""
+    """Filtra a atividade recente; silencio nao comprova fim de sessao."""
     now = now if now is not None else time.time()
     return {
         sid: info for sid, info in sessions.items()
@@ -437,12 +437,26 @@ def handle(payload):
 
     with Locked():
         data = load_map()
-        entry = ensure_row(data, key, agent_name)
+        # Um encerramento pode chegar duas vezes (agent.stopped e
+        # session.post_stop). Nunca cria/recria pane para evento terminal.
+        terminal = event in TERMINAL_EVENTS
+        entry = data.get(key) if terminal else ensure_row(data, key, agent_name)
         if not entry:
             return
-        sessions = drop_stale(entry.setdefault("sessions", {}))
-        if event in TERMINAL_EVENTS:
+        sessions = entry.setdefault("sessions", {})
+        if terminal:
             sessions.pop(session_id, None)
+            if not sessions:
+                # Fecha apenas o pane do bridge: a aba pode ter outros splits.
+                res = herdr("pane.close", {"pane_id": entry["pane_id"]})
+                if res and "result" in res:
+                    data.pop(key, None)
+                    log(f"linha encerrada para {agent_name}: {entry['pane_id']}")
+                else:
+                    # Mantem o mapa para tentar de novo no proximo terminal.
+                    log(f"pane.close sem sucesso para {entry['pane_id']}: {res}")
+                save_map(data)
+                return
         else:
             sessions[session_id] = {
                 "state": state,
@@ -451,13 +465,13 @@ def handle(payload):
                 "turn": payload.get("turn_id"),
                 "ts": time.time(),
             }
-        row_state, active = consolidate(sessions)
+        recent = drop_stale(sessions)
+        row_state, active = consolidate(recent)
         if active and active[1].get("name"):
             entry["last_title"] = active[1]["name"]
-        # sessao ociosa nao precisa ficar no mapa: o proximo evento dela readiciona.
-        # sem isso o contador de sessoes vivas so cresce.
-        entry["sessions"] = {s: i for s, i in sessions.items() if i.get("state") != "idle"}
-        live = len(entry["sessions"])
+        # Mantem sessoes abertas, inclusive ociosas ou sem evento recente,
+        # ate seu terminal: encerrar uma irma nao deve fechar o pane delas.
+        live = sum(i.get("state") != "idle" for i in recent.values())
         last_title = entry.get("last_title")
         data[key] = entry
         save_map(data)

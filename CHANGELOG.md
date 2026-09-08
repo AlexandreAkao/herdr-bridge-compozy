@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1
+
+**Close panes when sessions end.** The bridge now closes its pane when the
+last session receives `session.post_stop`, `agent.stopped`, or `agent.crashed`.
+Other open sessions sharing the pane keep it alive, including idle sessions
+and sessions without recent events. Ending a turn only marks it idle.
+
+Repeated stop events no longer create or reopen panes. A failed close keeps
+the mapping so a subsequent stop event can retry. Only the bridge's pane is
+closed, preserving any other splits in its tab.
+
+Adds 10 session lifecycle regression tests and runs the bridge suites in CI.
+
 ## 0.3.0
 
 **Loop rows.** 0.2.0 advertised loop visibility and it never worked: loop
