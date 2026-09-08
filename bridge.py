@@ -189,12 +189,11 @@ def drop_stale(sessions, now=None):
     }
 
 
-def tail_command(agent_name):
-    """Comando que roda dentro do pane: log do agente, colorido."""
+def tail_command(key):
+    """Comando que roda dentro do pane: eventos das sessoes desta linha."""
     here = os.path.dirname(os.path.abspath(__file__))
-    colorizer = os.path.join(here, "colorize.py")
-    return (f"compozy logs --follow --agent {agent_name} -o jsonl"
-            f" | python3 {colorizer}\n")
+    reader = os.path.join(here, "tail.py")
+    return f"python3 {shlex.quote(reader)} {shlex.quote(key)}\n"
 
 
 def ensure_row(data, key, agent_name):
@@ -210,8 +209,7 @@ def ensure_row(data, key, agent_name):
     pane_id = res["result"]["root_pane"]["pane_id"]
     tab_id = res["result"]["tab"]["tab_id"]
     # o pane vira um tail util em vez de um shell vazio.
-    # o CLI do compozy nao emite ANSI, entao o jsonl passa pelo colorize.py
-    herdr("pane.send_text", {"pane_id": pane_id, "text": tail_command(agent_name)})
+    herdr("pane.send_text", {"pane_id": pane_id, "text": tail_command(key)})
     entry = {"pane_id": pane_id, "tab_id": tab_id, "agent": agent_name, "sessions": {}}
     data[key] = entry
     log(f"linha criada para {agent_name}: {pane_id}")
@@ -662,7 +660,7 @@ def cmd_refresh():
         if entry.get("kind") == "loop":
             cmd = loop_tail_command(entry.get("run_id"), key.split("/", 2)[1])
         else:
-            cmd = tail_command(entry.get("agent") or key.split("/")[-1])
+            cmd = tail_command(key)
         if not pane_alive(pane_id):
             print(f"  {key}: pane morto, pulando")
             continue

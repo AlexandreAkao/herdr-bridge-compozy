@@ -1,6 +1,10 @@
 # What the colorizer drops, and why
 
-Measured on 400 consecutive events from a real `spec-cycle` loop.
+The original measurements below used 400 log summaries from a real
+`spec-cycle` loop. Since 0.3.3, agent panes read original session events:
+`compozy logs` summaries trim whitespace and truncate text, making them
+unsuitable for reconstructing messages. Successful raw tool results are also
+hidden; errors remain visible.
 
 | Slice | Share | Verdict |
 | --- | --- | --- |
@@ -22,9 +26,12 @@ just the tool name, immediately followed by the real command (221 bare
 **Every command starts with `cd <long path>;`.** The prefix ate half the width
 and truncation cut off the part that mattered, so it is stripped.
 
-**`agent_message` arrives in deltas.** One event carried a summary of a single
+**`agent_message` arrives in deltas.** One event carried text of a single
 character (`'E'`), the next carried `'ight of ten in. Both sweeps still
 running.'`. Rendering one line per fragment is unreadable; consecutive
-fragments stream onto one line.
+fragments stream together, preserving their original spaces, line breaks, and
+indentation. Command cleanup does not apply to message fragments: trimming each
+fragment would join separate words, while inserting a space between every
+fragment would split words that arrive in pieces.
 
-Result: 277 rendered lines became 66.
+Original log fixture result: 277 rendered lines became 66.

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Colore e enxuga o stream de logs do CompozyOS para o pane do herdr.
 
-Le `compozy logs --follow -o jsonl` no stdin. O CLI nao emite ANSI em
-nenhuma circunstancia (nao ha flag de cor nem FORCE_COLOR), entao cor e
-filtragem nascem aqui.
+Renderiza eventos originais via tail.py e aceita logs JSONL no stdin.
+Cor e filtragem nascem aqui; mensagens usam content.text sem limpeza.
 
 Medido num loop real (400 eventos): 30% era `usage`, 15% era `tool_result`
 com summary "[REDACTED]" (100% deles), 14% era linha repetida identica e
@@ -88,11 +87,34 @@ def flatten(summary):
     return head + (" ⏎ …" if len(parts) > 1 else "")
 
 
+def session_event(event):
+    """Adapta o evento original sem confundir seu texto com resumos de logs."""
+    content = event.get("content")
+    if not isinstance(content, dict) or "sequence" not in event:
+        return event
+    etype = event.get("type")
+    error = content.get("error") or content.get("tool_error")
+    outcome = "error" if error or etype == "error" else ""
+    if etype == "agent_message":
+        summary = content.get("text", "")
+    elif etype == "tool_result":
+        # A API original inclui resultados completos. Mantem o filtro de ruido
+        # sem despejar tool_input/tool_result no terminal.
+        summary = (content.get("error") or content.get("text") or
+                   content.get("title") or "tool failed") if error else ""
+    else:
+        summary = next((content[field] for field in
+                        ("text", "title", "error", "resource", "stop_reason", "tool_call_id")
+                        if content.get(field)), "")
+    return {**event, "summary": summary, "outcome": outcome}
+
+
 class Renderer:
     def __init__(self):
         self.last_text = ""         # ultima linha impressa, pra reescrever igual
         self.pending_label = None   # rotulo de ferramenta esperando o comando
         self.streaming = False      # dentro de uma sequencia de agent_message
+        self.stream_scope = None    # sessao/turno; mensagens irmas nao se fundem
         self.last_key = None        # (tipo, texto) da ultima linha impressa
         self.repeat = 1
 
@@ -119,11 +141,16 @@ class Renderer:
             self.last_key = None
 
     def feed(self, d):
+        d = session_event(d)
         etype = str(d.get("type") or "?")
         if etype in SKIP_TYPES or etype.startswith(SKIP_TYPE_PREFIXES):
             return
         outcome = str(d.get("outcome") or "")
-        summary = flatten(str(d.get("summary") or ""))
+        summary = str(d.get("summary") or "")
+        # Deltas de mensagem carregam os espacos entre palavras. A limpeza
+        # de comandos remove essas bordas e tambem destroi quebras/indentacao.
+        if etype != "agent_message":
+            summary = flatten(summary)
 
         # resultado vazio nao vira linha (a menos que seja falha)
         if etype == "tool_result" and summary in EMPTY_SUMMARIES and outcome not in OUTCOME_STYLE:
@@ -138,6 +165,10 @@ class Renderer:
         code = style_for(etype, outcome)
 
         if etype == "agent_message":
+            scope = (d.get("session_id"), d.get("turn_id"))
+            if self.streaming and scope != self.stream_scope:
+                self.close_stream()
+            self.stream_scope = scope
             head = f"\033[2;37m{ts}{RESET} \033[{code}m{'msg':<14}{RESET} "
             if self.streaming:
                 sys.stdout.write(summary)

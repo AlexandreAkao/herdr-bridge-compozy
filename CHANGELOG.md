@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.3
+
+**Read original messages instead of log summaries.** Log summaries already
+trim fragment boundaries and truncate at 240 characters. Agent panes now read
+the session events API through `tail.py`, scoped to their workspace and live
+sessions. Sequence cursors resume after connection failures without replaying
+messages or dropping bursts of events.
+
+**Preserve message formatting.** Messages bypass command cleanup. Spaces,
+whitespace-only fragments, line breaks, indentation, and long messages survive;
+subword fragments join without added separators. Different sessions and turns
+start separate message lines. Loop timelines keep their existing reader.
+
+Adds regressions for message rendering, session discovery, cursor recovery,
+workspace isolation, and quiet tool results. Refresh existing panes after updating.
+
 ## 0.3.2
 
 **Close completed loop panes too.** The last run ending as `done`, `no-op`,

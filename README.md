@@ -60,14 +60,23 @@ do not recreate a closed pane; a new session opens a new one.
 Each row owns a herdr tab running:
 
 ```
-compozy logs --follow --agent <name> -o jsonl | colorize.py
+python3 tail.py <workspace_id>/<agent_name>
 ```
 
-`colorize.py` exists because the CompozyOS CLI never emits ANSI — there is no
-color flag and no `FORCE_COLOR` handling. It colors by event type and outcome,
-and cuts the noise: measured on a real loop, 400 raw events rendered as 277
-lines before filtering and 66 after (76% less). What it drops and why is in
+`tail.py` reads original session events from the local Compozy daemon and
+renders them with `colorize.py`. Unlike log summaries, original message text
+retains spaces, line breaks, indentation, and content beyond 240 characters.
+Fragments join exactly as received; changing session or turn starts a new line.
+
+The reader discovers sessions from the bridge map, scoped to the row's
+workspace. It initially shows the latest 100 events per session, then polls
+once per second using sequence cursors. Reconnection resumes after the last
+rendered event. Tool output and infrastructure noise stay filtered; see
 [docs/log-noise.md](docs/log-noise.md).
+
+After updating, restart existing bridge viewers with
+`python3 ~/.compozy/extensions/herdr-bridge/bridge.py --refresh`.
+New panes use the updated reader automatically.
 
 ## Commands
 

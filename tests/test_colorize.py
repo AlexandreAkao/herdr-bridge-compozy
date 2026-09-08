@@ -3,6 +3,7 @@
 
 Roda sem dependencias: python3 tests/test_colorize.py
 """
+import json
 import os
 import re
 import subprocess
@@ -44,6 +45,18 @@ def render():
     return visible, out
 
 
+def check_message_stream(label, fragments, expected):
+    payload = "".join(json.dumps({"type": "agent_message", "summary": fragment,
+                                  "timestamp": "2026-01-01T10:00:00Z"}) + "\n"
+                      for fragment in fragments)
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "colorize.py")],
+                            input=payload.encode(), capture_output=True, timeout=30,
+                            check=True)
+    text = ANSI.sub("", result.stdout.decode())
+    head = f"10:00:00 {'msg':<14} "
+    check(label, text == head + expected + "\n")
+
+
 def main():
     visible, raw = render()
     body = "\n".join(visible)
@@ -64,6 +77,20 @@ def main():
     check("falha sobrevive ao filtro de tool_result", "suite failed: 2 specs" in body)
     check("falha sai em vermelho", "\033[1;31m" in raw)
     check("12 eventos viram 5 linhas visiveis", len(visible) == 5)
+
+    check_message_stream("espacos na fronteira dos fragmentos sao preservados",
+                         ["as", " required", " by", " the", " task", " runtime", ";",
+                          " these", " govern", " the", " repository", " workflow", "."],
+                         "as required by the task runtime; these govern the repository workflow.")
+    check_message_stream("fragmentos dentro da palavra nao recebem espaco extra",
+                         ["Runn", "ing", " ", "the ", "suite", " now", "."],
+                         "Running the suite now.")
+    check_message_stream("quebras, linhas vazias e indentacao de mensagens sobrevivem",
+                         ["Example:\n", "\n", "```python\n", "    ", "print('ok')", "\n```"],
+                         "Example:\n\n```python\n    print('ok')\n```")
+    check_message_stream("texto de mensagem nao sofre limpeza de comando",
+                         ["cd /srv/app && ", "run the suite"],
+                         "cd /srv/app && run the suite")
 
     print()
     if failures:
