@@ -74,6 +74,7 @@ lines before filtering and 66 after (76% less). What it drops and why is in
 | Command | What it does |
 | --- | --- |
 | `bridge.py --status` | Shows the map, prunes dead panes, reconciles loop rows against the daemon |
+| `bridge.py --watch-loops` | Monitors loop status until no loop rows remain; normally started by the hook drainer |
 | `bridge.py --refresh` | Restarts the tail in existing panes without closing tabs |
 | `bridge.py --reset` | Closes every tab the bridge opened and clears the map |
 
@@ -107,7 +108,7 @@ Only `user` and `system` sessions get a row. The daemon's own internals
 A loop is not an agent — it is a run that spawns agent sessions, and its events
 carry `loop_run_id` / `loop_name` / `generation`, never `agent_name`. So each
 loop gets its own row, keyed `loop/<workspace>/<loop_name>`, whose pane follows
-`compozy loop events --run <id> --follow`.
+`compozy loop events <id> --follow --workspace <workspace_id>`.
 
 | Event | Mode | Row becomes |
 | --- | --- | --- |
@@ -117,15 +118,25 @@ loop gets its own row, keyed `loop/<workspace>/<loop_name>`, whose pane follows
 | `loop.generation.post`, `loop.gate.post` | async | `working`, `$cz_gen` |
 | `loop.node.terminal` | async | `$cz_node = review.0:succeeded` |
 | `loop.terminal` with `status: blocked` | async | **`blocked`** — and it stays until you act |
-| `loop.terminal` with `done` / `exhausted` / `canceled` | async | `idle`, `$cz_status` |
+| `loop.terminal` with `done` / `no-op` / `failed` / `exhausted` / `stalled` / `canceled` | async | pane closes when the last run ends |
 
 The two **sync** hooks are the reliable ones: the daemon waits for them. The
 async ones are canceled whenever the emitting step's context ends — on a
 zero-agent loop that finishes in 200 ms, nearly all of them; on a real loop,
-mostly `loop.terminal`, which fires as the run's context closes. That is the
-event that says `blocked`, so `bridge.py --status` **reconciles** every live
-loop row against `compozy loop status` and fixes the state. Run it when a row
-looks stale.
+mostly `loop.terminal`, which fires as the run's context closes.
+
+After draining the spool, one detached process monitors loop rows through the
+Compozy daemon's local briefing API, with five seconds between passes. This
+recovers missing terminal hooks without needing another event or a manual
+status check. It stops when no loop rows remain. A file lock keeps only one
+monitor active, and daemon queries do not hold the map lock used by hooks.
+
+Only confirmed terminal outcomes close panes. Queued, watching, paused,
+approval-waiting, and blocked runs remain visible. Unknown statuses or an
+unavailable daemon leave the pane intact; failed closes are retried.
+
+For rows left open before upgrading, `bridge.py --status` also runs this
+reconciliation once. Normal hook delivery starts the automatic monitor.
 
 ### Rows are per agent, and they self-heal
 

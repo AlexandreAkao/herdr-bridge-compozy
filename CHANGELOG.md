@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.2
+
+**Close completed loop panes too.** The last run ending as `done`, `no-op`,
+`failed`, `exhausted`, `stalled`, or `canceled` closes the bridge pane.
+Concurrent runs keep their shared pane, including quiet runs. Repeated terminal
+events never create panes or switch the timeline back to an older run.
+
+**Recover canceled terminal hooks automatically.** One detached spool drainer
+monitors loop status through the daemon's local briefing API, with five seconds
+between passes. It closes completed rows left by older versions and retries
+failed closes. Daemon queries run outside the map lock so hooks remain responsive.
+Running, queued, watching, paused, approval-waiting, and blocked runs stay visible;
+unknown statuses and connection failures never trigger a close.
+
+Updates loop tails to the current `compozy loop events <run> --follow` syntax
+and passes the owning workspace explicitly. Adds 18 loop lifecycle regressions.
+
 ## 0.3.1
 
 **Close panes when sessions end.** The bridge now closes its pane when the

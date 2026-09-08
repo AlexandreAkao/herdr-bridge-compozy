@@ -130,7 +130,7 @@ def test_loop_rows():
         check("loop.started cria uma linha propria (tab.create)",
               any(m == "tab.create" and p["label"].startswith("cz:loop:") for m, p in fake.calls))
         check("o pane segue a timeline do run",
-              any(m == "pane.send_text" and "loop events --run" in p["text"] for m, p in fake.calls))
+              any(m == "pane.send_text" and "loop events looprun-" in p["text"] for m, p in fake.calls))
         check("linha nasce working", fake.reports()[-1]["state"] == "working")
 
         bridge.handle(by["loop.generation.post"])
@@ -150,15 +150,16 @@ def test_loop_rows():
 
         done = dict(by["loop.terminal"]); done["status"] = "done"
         bridge.handle(done)
-        check("terminal done -> idle", fake.reports()[-1]["state"] == "idle")
-        check("motivo fica no token", fake.last_tokens().get("cz_status") == "done")
+        check("terminal done fecha o pane", any(m == "pane.close" for m, _ in fake.calls))
+        check("linha encerrada sai do mapa", not bridge.load_map())
 
-        bridge.handle(by["loop.started"])
-        blocked = dict(by["loop.terminal"]); blocked["status"] = "blocked"
+        started = dict(by["loop.started"], loop_run_id="looprun-blocked")
+        bridge.handle(started)
+        blocked = dict(by["loop.terminal"], loop_run_id="looprun-blocked", status="blocked")
         bridge.handle(blocked)
         check("terminal blocked -> linha blocked", fake.reports()[-1]["state"] == "blocked")
-        check("o mesmo loop reusa a linha (uma tab so)",
-              sum(1 for m, _ in fake.calls if m == "tab.create") == 1)
+        check("run novo cria outra linha depois do fechamento",
+              sum(1 for m, _ in fake.calls if m == "tab.create") == 2)
 
         entry = next(e for e in bridge.load_map().values() if e.get("kind") == "loop")
         stale = bridge.drop_stale(entry["sessions"], now=time.time() + bridge.STALE_SESSION_SECONDS * 2)
@@ -193,7 +194,8 @@ def test_drain_order():
         n = bridge.drain_spool()
         check("drena os 3 validos", n == 3)
         states = [r["state"] for r in fake.reports()]
-        check("processa em ordem de timestamp: working, working, idle", states == ["working", "working", "idle"])
+        check("processa em ordem de timestamp e termina fechando", states == ["working", "working"]
+              and any(m == "pane.close" for m, _ in fake.calls) and not bridge.load_map())
         check("arquivo corrompido e descartado sem quebrar", not os.listdir(bridge.SPOOL_DIR))
         check("segunda drenagem nao encontra nada", bridge.drain_spool() == 0)
     finally:

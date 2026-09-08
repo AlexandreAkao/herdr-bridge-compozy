@@ -8,14 +8,18 @@ nao por sessao (as sessoes de loop sao efemeras e se repetem).
 Nunca falha o hook: qualquer erro vira exit 0.
 """
 import fcntl
+import http.client
 import json
 import os
 import re
+import shlex
 import socket
 import sys
 import time
+from urllib.parse import quote
 
 HERDR_SOCK = os.path.expanduser("~/.config/herdr/herdr.sock")
+COMPOZY_SOCK = os.path.join(os.environ.get("COMPOZY_HOME", os.path.expanduser("~/.compozy")), "daemon.sock")
 STATE_DIR = os.path.expanduser("~/.local/state/herdr-bridge")
 MAP_PATH = os.path.join(STATE_DIR, "panes.json")
 SPOOL_DIR = os.path.join(STATE_DIR, "spool")
@@ -51,6 +55,10 @@ LOOP_EVENTS = {"loop.started", "loop.generation.pre", "loop.generation.post",
 LOOP_TASK_ID = re.compile(r"^loop\.(looprun-[a-z0-9]+)\.g(\d+)(?:\.node\.(.+))?$")
 # status de loop.terminal que exige o operador (fica na linha ate ser resolvido)
 LOOP_BLOCKED_STATUSES = {"blocked"}
+LOOP_CLOSED_STATUSES = {"done", "no-op", "failed", "exhausted", "stalled", "canceled"}
+LOOP_STATUS_STATE = {"running": "working", "queued": "idle", "watching": "idle",
+                     "needs-approval": "blocked", "paused": "blocked", "blocked": "blocked"}
+LOOP_WATCH_SECONDS = 5
 
 # session.attention.changed carrega `from`/`to` (atividade da sessao) e
 # `class` — o motivo pelo qual ela quer voce. Vocabulario observado em runtime:
@@ -140,6 +148,18 @@ def save_map(data):
     os.replace(tmp, MAP_PATH)
 
 
+def close_row(data, key):
+    """Fecha so o pane do bridge. Com lock; falhas mantem a entrada para retry."""
+    entry = data[key]
+    res = herdr("pane.close", {"pane_id": entry["pane_id"]})
+    if res and ("result" in res or (res.get("error") or {}).get("code") == "pane_not_found"):
+        data.pop(key, None)
+        log(f"linha encerrada para {key}: {entry['pane_id']}")
+        return True
+    log(f"pane.close sem sucesso para {entry['pane_id']}: {res}")
+    return False
+
+
 def pane_alive(pane_id):
     res = herdr("pane.get", {"pane_id": pane_id})
     return bool(res and "result" in res)
@@ -225,9 +245,12 @@ def read_attention(payload):
     return True
 
 
-def loop_tail_command(loop_run_id):
+def loop_tail_command(loop_run_id, workspace_id=None):
     """Comando do pane de uma linha de loop: a timeline viva do run."""
-    return f"compozy loop events --run {loop_run_id} --follow\n"
+    args = ["compozy", "loop", "events", loop_run_id, "--follow"]
+    if workspace_id:
+        args += ["--workspace", workspace_id]
+    return shlex.join(args) + "\n"
 
 
 def loop_key(workspace_id, loop_name):
@@ -243,7 +266,8 @@ def node_label(task_id):
 def find_loop_entry(data, loop_run_id):
     """loop.node.terminal nao traz loop_name, so loop_run_id."""
     for key, entry in data.items():
-        if entry.get("kind") == "loop" and loop_run_id in (entry.get("sessions") or {}):
+        if entry.get("kind") == "loop" and (loop_run_id in (entry.get("sessions") or {})
+                                            or entry.get("run_id") == loop_run_id):
             return key, entry
     return None, None
 
@@ -251,12 +275,13 @@ def find_loop_entry(data, loop_run_id):
 def ensure_loop_row(data, key, loop_name, loop_run_id):
     """Linha do loop, criando a aba se preciso. Com o lock ja segurado."""
     entry = data.get(key)
+    workspace_id = key.split("/", 2)[1]
     if entry and pane_alive(entry.get("pane_id", "")):
         if entry.get("run_id") != loop_run_id:
             # run novo: troca a timeline que o pane segue
             herdr("pane.send_keys", {"pane_id": entry["pane_id"], "keys": ["ctrl+c"]})
             time.sleep(0.3)
-            herdr("pane.send_text", {"pane_id": entry["pane_id"], "text": loop_tail_command(loop_run_id)})
+            herdr("pane.send_text", {"pane_id": entry["pane_id"], "text": loop_tail_command(loop_run_id, workspace_id)})
             entry["run_id"] = loop_run_id
         return entry
     res = herdr("tab.create", {"label": f"cz:loop:{loop_name}", "focus": False})
@@ -264,7 +289,7 @@ def ensure_loop_row(data, key, loop_name, loop_run_id):
         return None
     pane_id = res["result"]["root_pane"]["pane_id"]
     tab_id = res["result"]["tab"]["tab_id"]
-    herdr("pane.send_text", {"pane_id": pane_id, "text": loop_tail_command(loop_run_id)})
+    herdr("pane.send_text", {"pane_id": pane_id, "text": loop_tail_command(loop_run_id, workspace_id)})
     entry = {"kind": "loop", "pane_id": pane_id, "tab_id": tab_id,
              "loop": loop_name, "run_id": loop_run_id, "sessions": {}}
     data[key] = entry
@@ -286,14 +311,15 @@ def handle_loop(payload):
     with Locked():
         data = load_map()
         loop_name = payload.get("loop_name")
+        terminal = event == "loop.terminal"
         if loop_name:
             key = loop_key(payload.get("workspace_id"), loop_name)
-            entry = ensure_loop_row(data, key, loop_name, run_id)
+            entry = data.get(key) if terminal else ensure_loop_row(data, key, loop_name, run_id)
         else:
             key, entry = find_loop_entry(data, run_id)
         if not entry:
             return
-        runs = drop_stale(entry.setdefault("sessions", {}))
+        runs = entry.setdefault("sessions", {})
         info = runs.get(run_id) or {"name": entry.get("loop"), "state": "working"}
         info["ts"] = time.time()
 
@@ -322,14 +348,20 @@ def handle_loop(payload):
             info["status"] = status
             if status in LOOP_BLOCKED_STATUSES:
                 info["state"] = "blocked"
-            else:
+            elif status in LOOP_CLOSED_STATUSES:
                 runs.pop(run_id, None)   # acabou: sai do calculo da linha
                 entry["last_status"] = status
                 info = None
+            else:
+                # Status novo/desconhecido nao comprova que o run acabou.
+                return
         if info is not None:
             runs[run_id] = info
-        row_state, active = consolidate(runs)
-        entry["sessions"] = {r: i for r, i in runs.items() if i.get("state") != "idle"}
+        if terminal and not runs:
+            close_row(data, key)
+            save_map(data)
+            return
+        row_state, active = consolidate(drop_stale(runs))
         data[key] = entry
         save_map(data)
     report_loop_row(entry, row_state, active, event)
@@ -361,18 +393,26 @@ def report_loop_row(entry, row_state, active, event):
 
 
 def query_loop_status(run_id, workspace_id):
-    """Pergunta ao daemon o status de um run. Custa ~10s por causa da
-    resolucao de workspace do lado dele, por isso so roda sob demanda."""
-    import subprocess
+    """Le o briefing pela mesma API local do CLI, sem resolver workspace de novo."""
+    if not workspace_id or workspace_id == "no-ws":
+        return None
+    conn = http.client.HTTPConnection("localhost", timeout=5)
     try:
-        out = subprocess.run(
-            ["compozy", "loop", "status", "--run-id", run_id, "--workspace", workspace_id, "-o", "json"],
-            capture_output=True, text=True, timeout=30,
-        ).stdout
-        return str((json.loads(out).get("run") or {}).get("status") or "").lower() or None
+        conn.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        conn.sock.settimeout(5)
+        conn.sock.connect(COMPOZY_SOCK)
+        path = f"/api/workspaces/{quote(workspace_id, safe='')}/loop-runs/{quote(run_id, safe='')}/briefing"
+        conn.request("GET", path)
+        response = conn.getresponse()
+        if response.status != 200:
+            log(f"reconcile {run_id}: HTTP {response.status}")
+            return None
+        return str(json.loads(response.read()).get("status") or "").lower() or None
     except Exception as exc:
         log(f"reconcile {run_id}: {exc}")
         return None
+    finally:
+        conn.close()
 
 
 def reconcile_loops():
@@ -383,30 +423,74 @@ def reconcile_loops():
     evento mais exposto. Sem isso a linha fica `working` com o loop ja
     encerrado."""
     fixed = []
+    # Consulta fora do lock: um daemon lento nao pode parar os hooks.
     with Locked():
         data = load_map()
+        targets = []
         for key, entry in data.items():
-            if entry.get("kind") != "loop" or not entry.get("sessions"):
+            if entry.get("kind") != "loop":
                 continue
             workspace_id = key.split("/")[1] if key.count("/") >= 2 else None
-            runs = entry["sessions"]
-            for run_id in list(runs):
-                status = query_loop_status(run_id, workspace_id)
-                if not status or status == "running":
+            runs = list(entry.get("sessions") or {})
+            if not runs and entry.get("run_id"):
+                runs = [entry["run_id"]]  # v0.3.1 e anteriores guardavam linhas vazias
+            targets.extend((key, entry["pane_id"], run_id, workspace_id) for run_id in runs)
+    for key, pane_id, run_id, workspace_id in targets:
+        status = query_loop_status(run_id, workspace_id)
+        if status not in LOOP_CLOSED_STATUSES and status not in LOOP_STATUS_STATE:
+            continue
+        with Locked():
+            data = load_map()
+            entry = data.get(key)
+            if not entry or entry["pane_id"] != pane_id:
+                continue
+            runs = entry.setdefault("sessions", {})
+            if run_id not in runs and entry.get("run_id") != run_id:
+                continue
+            if status in LOOP_CLOSED_STATUSES:
+                runs.pop(run_id, None)
+                entry["last_status"] = status
+                fixed.append((key, run_id, status))
+                if not runs:
+                    close_row(data, key)
+                    save_map(data)
                     continue
-                if status in LOOP_BLOCKED_STATUSES:
-                    runs[run_id]["state"] = "blocked"
-                    runs[run_id]["status"] = status
-                else:
-                    runs.pop(run_id, None)
-                    entry["last_status"] = status
+            else:
+                info = runs.get(run_id) or {"name": entry.get("loop")}
+                changed = info.get("state") != LOOP_STATUS_STATE[status] or info.get("status") != status
+                info.update(state=LOOP_STATUS_STATE[status], status=status, ts=time.time())
+                runs[run_id] = info
+                if not changed:
+                    save_map(data)
+                    continue
                 fixed.append((key, run_id, status))
             row_state, active = consolidate(runs)
-            entry["sessions"] = {r: i for r, i in runs.items() if i.get("state") != "idle"}
-            if any(k == key for k, _, _ in fixed):
-                report_loop_row(entry, row_state, active, "reconcile")
-        save_map(data)
+            report_loop_row(entry, row_state, active, "reconcile")
+            save_map(data)
     return fixed
+
+
+def watch_loops():
+    """Um drenador fica vivo enquanto houver loops; os demais saem sem esperar.
+
+    O hook.sh ja o destacou do daemon com nohup. Assim, perder loop.terminal
+    nao deixa o pane aberto e a proxima chamada de hook nao precisa chegar.
+    """
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, ".watch-lock"), "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        while True:
+            reconcile_loops()
+            with Locked():
+                if not any(e.get("kind") == "loop" for e in load_map().values()):
+                    # Solta o lock de watcher antes de permitir um novo hook
+                    # criar linha: esse drenador podera assumir o monitor.
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    return
+            time.sleep(LOOP_WATCH_SECONDS)
 
 
 def handle(payload):
@@ -447,14 +531,7 @@ def handle(payload):
         if terminal:
             sessions.pop(session_id, None)
             if not sessions:
-                # Fecha apenas o pane do bridge: a aba pode ter outros splits.
-                res = herdr("pane.close", {"pane_id": entry["pane_id"]})
-                if res and "result" in res:
-                    data.pop(key, None)
-                    log(f"linha encerrada para {agent_name}: {entry['pane_id']}")
-                else:
-                    # Mantem o mapa para tentar de novo no proximo terminal.
-                    log(f"pane.close sem sucesso para {entry['pane_id']}: {res}")
+                close_row(data, key)
                 save_map(data)
                 return
         else:
@@ -583,7 +660,7 @@ def cmd_refresh():
     for key, entry in load_map().items():
         pane_id = entry["pane_id"]
         if entry.get("kind") == "loop":
-            cmd = loop_tail_command(entry.get("run_id"))
+            cmd = loop_tail_command(entry.get("run_id"), key.split("/", 2)[1])
         else:
             cmd = tail_command(entry.get("agent") or key.split("/")[-1])
         if not pane_alive(pane_id):
@@ -598,14 +675,17 @@ def cmd_refresh():
 def main():
     if len(sys.argv) > 1:
         if sys.argv[1] == "--drain":
-            return drain_spool()
+            drain_spool()
+            return watch_loops()
+        if sys.argv[1] == "--watch-loops":
+            return watch_loops()
         if sys.argv[1] == "--refresh":
             return cmd_refresh()
         if sys.argv[1] == "--status":
             return cmd_status()
         if sys.argv[1] == "--reset":
             return cmd_reset()
-        print("uso: bridge.py [--drain|--status|--refresh|--reset]   (sem args: payload no stdin)")
+        print("uso: bridge.py [--drain|--watch-loops|--status|--refresh|--reset]   (sem args: payload no stdin)")
         return
     raw = sys.stdin.read()
     if not raw.strip():

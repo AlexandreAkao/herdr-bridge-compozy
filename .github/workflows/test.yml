@@ -19,3 +19,4 @@ jobs:
         run: |
           python3 tests/test_bridge.py
           python3 tests/test_session_lifecycle.py
+          python3 tests/test_loop_lifecycle.py
